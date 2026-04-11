@@ -1,4 +1,5 @@
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
+import math
 
 class ItanMindConfig(PretrainedConfig):
     model_type = "Itanmind"
@@ -35,3 +36,19 @@ class ItanMindConfig(PretrainedConfig):
         self.moe_intermediate_size = kwargs.get("moe_intermediate_size", self.intermediate_size)
         self.norm_topk_prob = kwargs.get("norm_topk_prob", True)
         self.router_aux_loss_coef = kwargs.get("router_aux_loss_coef", 5e-4)
+
+import torch
+import torch.nn as nn
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-5):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    def _norm(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.weight * self._norm(x) * x

@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Dataset files (large files, add back if needed)
+dataset/*.bin
+dataset/*.json
+dataset/*.csv
+dataset/*.parquet
+dataset/*.arrow
+
+# Model checkpoints (large files)
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# Logs
+*.log
+wandb/
+runs/
+logs/
+
+# Misc
+.env

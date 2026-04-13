@@ -39,6 +39,8 @@ class ItanMindConfig(PretrainedConfig):
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from typing import Optional, Tuple
 
 class RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-5):
@@ -52,3 +54,51 @@ class RMSNorm(nn.Module):
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.weight * self._norm(x) * x
+
+# init RoPE freqs
+def precompute_freqs_cis(dim: int, end: int = 32*1024, rope_base: float = 10000.0, rope_scaling: Optional[dict] = None):
+    freqs, attn_factors = (1.0 / (rope_base ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))), 1.0
+    if rope_scaling is not None:
+        orig_max, factor, beta_fast, beta_slow = (
+            rope_scaling["original_max_position_embeddings"],
+            rope_scaling["factor"],
+            rope_scaling["beta_fast"],
+            rope_scaling["beta_slow"]
+        )
+
+        if end > orig_max:
+            # b < low 为高频（转圈数 > beta_fast）
+            # b > high 为低频（转圈数 < beta_slow）
+            low  = max(math.floor((dim * math.log(orig_max / (beta_fast * 2 * math.pi))) / (2 * math.log(rope_base))), 0)
+            high = min(math.ceil( (dim * math.log(orig_max / (beta_slow * 2 * math.pi))) / (2 * math.log(rope_base))), dim // 2 - 1)
+
+            ramp = torch.arange(dim // 2, dtype=torch.float32)  # [0, 1, 2, ..., dim//2 - 1]
+            ramp = (ramp - low) / (high - low + 1e-3)
+            ramp = torch.clamp(ramp, 0.0, 1.0)
+
+            # 当 ramp=0 时（高频）：系数为 1，保持原频率不变。
+            # 当 ramp=1 时（低频）：系数为 1/factor，即对频率进行线性插值缩放。
+            # ramp在0-1之间时：平滑过渡。
+            freqs = freqs * (1 - ramp + ramp / factor)
+            attn_factors = 0.1 * math.log(factor) + 1.0    # mscale
+
+    t = torch.arange(end, device=freqs.device)
+    freqs = torch.outer(t, freqs).float()
+    emb = torch.cat([freqs, freqs], dim=-1)
+    cos = emb.cos() * attn_factors
+    sin = emb.sin() * attn_factors
+    return cos, sin
+
+# RoPE (Rotary Position Embedding)
+def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos:torch.Tensor, sin:torch.Tensor, unsqueeze_dim: int = 1):
+
+    def rotate_half(x):
+        return torch.cat([-x[..., x.shape[-1] // 2 : ], x[..., : x.shape[-1] // 2]], dim=-1)
+
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+
+    return q_embed, k_embed
+

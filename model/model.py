@@ -2,6 +2,9 @@ from transformers import PretrainedConfig
 import math
 
 from transformers.activations import ACT2FN
+from transformers import PretrainedModel, GenerationMixin
+from transformers.modeling_outputs import CausalLMOutputWithPast
+
 
 class ItanMindConfig(PretrainedConfig):
     model_type = "Itanmind"
@@ -300,3 +303,49 @@ class ItanMindModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states, present_key_values
 
+class ItanMind4CausalLM(PretrainedModel, GenerationMixin):
+    config_class = ItanMindConfig
+
+    def __init__(self, config: ItanMindConfig):
+        self.config = config
+
+        super().__init__(config)
+
+        self.model = ItanMindModel(config)
+
+        self.lm_head = nn.Linear(
+            self.config.hidden_size, self.config.vocab_size, bias=False
+        )
+
+        self.model.embed_tokens.weight = self.lm_head.weight
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[list] = None,
+        use_cache: bool = False,
+        labels: Optional[torch.Tensor] = None,
+    ):
+        hidden_states, present_key_values = self.model(
+            input_ids, attention_mask, past_key_values, use_cache
+        )
+
+        logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            # 向左移一位：用前 n-1 个 token 预测后 n-1 个 token
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss = F.cross_entropy(
+                shift_logits.view(-1, self.config.vocab_size),
+                shift_labels.view(-1),
+                ignore_index=-100,
+            )
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=present_key_values if use_cache else None,
+        )

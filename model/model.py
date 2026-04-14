@@ -102,3 +102,87 @@ def apply_rotary_pos_emb(q: torch.Tensor, k: torch.Tensor, cos:torch.Tensor, sin
 
     return q_embed, k_embed
 
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    bs, slen, num_kv_heads, head_dim = x.shape
+    if n_rep == 1:
+        return x
+    x = x[..., None, :].expand(bs, slen, num_kv_heads, n_rep, head_dim)
+    return x.reshape(bs, slen, num_kv_heads * n_rep, head_dim)
+
+class Attention(nn.Module):
+    # GQA (Grouped Query Attention) 把 Q 头分成若干组，每组共享一个 K 头和 V 头。
+    def __init__(self, args: ItanMindConfig):
+        super().__init__()
+        self.n_local_heads = args.num_attention_heads
+        self.num_kv_heads = args.num_key_value_heads if args.num_key_value_heads is not None else args.num_attention_heads
+        assert self.n_local_heads % self.num_kv_heads == 0, "num_attention_heads 必须能被 num_key_value_heads 整除"
+
+        self.n_rep = self.num_kv_heads // self.n_local_heads
+        self.head_dim = args.hidden_size // args.num_attention_heads
+
+        self.q_proj = nn.Linear(args.hidden_size, args.num_attention_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(args.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(args.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(args.num_attention_heads * self.head_dim, args.hidden_size, bias=False)
+
+        self.attn_dropout = nn.Dropout(args.dropout)
+        self.resid_dropout = nn.Dropout(args.dropout)
+        self.dropout = args.dropout
+
+        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention') and args.flash_attn
+
+    def forward(self, x: torch.Tensor, position_embeddings:Tuple[torch.Tensor, torch.Tensor], 
+                past_key_value: Optional[Tuple[torch.Tensor, torch.Tensor]] = None, 
+                use_cache: bool = False,
+                attention_mask: Optional[torch.Tensor] = None,) -> torch.Tensor:
+        
+        bs, seq_len, _ = x.shape
+        xq = self.q_proj(x)
+        xk = self.k_proj(x)
+        xv = self.v_proj(x)
+
+        xq = xq.view(bs, seq_len, self.n_local_heads, self.head_dim)
+        xk = xk.view(bs, seq_len, self.num_kv_heads, self.head_dim)
+        xv = xv.view(bs, seq_len, self.num_kv_heads, self.head_dim)
+
+        #use rope on qk
+        cos, sin = position_embeddings
+        xq, xk = apply_rotary_pos_emb(xq, xk, cos[:seq_len], sin[:seq_len])
+
+        if past_key_value is not None:
+            xk = torch.cat([past_key_value[0], xk], dim=1)
+            xv = torch.cat([past_key_value[1], xv], dim=1)
+        past_kv = (xk, xv)
+
+        xq, xk, xv = (
+            xq.transpose(1, 2),
+            repeat_kv(xk, self.n_rep).transpose(1, 2),
+            repeat_kv(xv, self.n_rep).transpose(1, 2)
+        )
+
+        if self.flash and seq_len > 1:
+            dropout_p = self.dropout if self.training else 0.0
+            if attention_mask is None:
+                output = F.scaled_dot_product_attention(
+                    xq, xk, xv,
+                    attn_mask=None,
+                    dropout_p=dropout_p,
+                    is_causal=True
+                )
+
+        else:
+            kv_seq_len = xk.shape[-2]
+            scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
+            if seq_len > 1:
+                # 上三角（未来位置）填 -inf，对角线及以下保留
+                causal_mask = torch.full((seq_len, kv_seq_len), float('-inf'), device=xq.device)
+                causal_mask = causal_mask.triu(kv_seq_len - seq_len + 1)
+                scores = scores + causal_mask
+            if attention_mask is not None:
+                scores = scores + attention_mask
+            scores = F.softmax(scores.float(), dim=-1).type_as(xq)
+            scores = self.attn_dropout(scores)
+            output = (scores @ xv).transpose(1, 2).contiguous().view(bs, seq_len, -1)
+            output = self.resid_dropout(self.o_proj(output))
+
+        return output, past_kv if use_cache else None

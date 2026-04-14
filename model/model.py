@@ -149,7 +149,7 @@ class Attention(nn.Module):
 
         #use rope on qk
         cos, sin = position_embeddings
-        xq, xk = apply_rotary_pos_emb(xq, xk, cos[:seq_len], sin[:seq_len])
+        xq, xk = apply_rotary_pos_emb(xq, xk, cos, sin)
 
         if past_key_value is not None:
             xk = torch.cat([past_key_value[0], xk], dim=1)
@@ -244,3 +244,59 @@ class ItanMindBlock(nn.Module):
         hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
 
         return hidden_states, present_key_value
+
+class ItanMindModel(nn.Module):
+    def __init__(self, config: ItanMindConfig):
+        super().__init__()
+        self.vocab_size = config.vocab_size 
+        self.num_hidden_layers = config.num_hidden_layers
+
+        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.dropout)
+
+        self.layer = nn.ModuleList(
+            [ItanMindBlock(i, config) for i in range(self.num_hidden_layers)]
+        )
+
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        # RoPE pre compute
+        cos, sin = precompute_freqs_cis(
+            config.head_dim,
+            config.max_position_embeddings,
+            config.rope_theta,
+            config.rope_scaling,
+        )
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_values: Optional[list] = None,
+        use_cache: bool = False,
+    ):
+        bs, seq_len = input_ids.shape
+        hidden_states = self.dropout(self.embed_tokens(input_ids))
+
+        start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
+        position_embeddings = (self.cos[start_pos:start_pos + seq_len], self.sin[start_pos:start_pos + seq_len])
+
+        if past_key_values is None:
+            past_key_values = [None] * self.num_hidden_layers
+
+        present_key_values = []
+        for i, layer in enumerate(self.layer):
+            hidden_states, present_kv = layer(
+                hidden_states,
+                position_embeddings,
+                past_key_values[i],
+                use_cache,
+                attention_mask,
+            )
+            present_key_values.append(present_kv)
+
+        hidden_states = self.norm(hidden_states)
+        return hidden_states, present_key_values
+

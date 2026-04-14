@@ -1,6 +1,8 @@
 from transformers import PretrainedConfig
 import math
 
+from transformers.activations import ACT2FN
+
 class ItanMindConfig(PretrainedConfig):
     model_type = "Itanmind"
     def __init__(self, hidden_size=768, num_hidden_layers=8, use_moe=False, **kwargs):
@@ -186,3 +188,26 @@ class Attention(nn.Module):
             output = self.resid_dropout(self.o_proj(output))
 
         return output, past_kv if use_cache else None
+
+class FeedForward(nn.Module):
+    # 初始化
+    # 升维
+    # 降维
+    # 门控
+    # droout
+    # 激活函数
+    def __init__(self, args: ItanMindConfig):
+        super().__init__()
+        if args.intermediate_size is None:
+            intermediate_size = int(args.hidden_size*8/3)
+            args.intermediate_size = 64 * ((intermediate_size + 64 -1) // 64)
+
+        self.up_proj = nn.Linear(args.hidden_size, args.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(args.intermediate_size, args.hidden_size, bias=False)
+        self.gate_proj = nn.Linear(args.hidden_size, args.intermediate_size, bias=False)
+        self.dropout = nn.Dropout(args.dropout)
+        self.act_fn = ACT2FN[args.hidden_act]
+
+    def forward(self, x):
+        return self.dropout(self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x)))
+

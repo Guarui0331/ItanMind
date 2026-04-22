@@ -2,7 +2,7 @@
 CPU smoke test: 在不依赖 GPU 的前提下，把训练链路从头到尾打通一遍，
 尽可能覆盖 model.py / dataset / trainer 可能出 bug 的地方。
 跑法（项目根目录）:
-    python tests/smoke_test.py
+    python smoke_test.py
 任何一项 FAIL 都说明上 GPU 前需要先修。
 """
 import os
@@ -11,10 +11,9 @@ import json
 import tempfile
 import traceback
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 import torch
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from model.model import ItanMindConfig, ItanMind4CausalLM
@@ -132,7 +131,7 @@ def _make_tiny_jsonl(path):
 
 
 def test_dataset_and_train_step():
-    tokenizer_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'model'))
+    tokenizer_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'model'))
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
     with tempfile.TemporaryDirectory() as td:
@@ -163,17 +162,13 @@ def test_dataset_and_train_step():
     model.train()
     opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
 
-    # 模拟 trainer 的 batch 解包
-    if len(batch) == 3:
-        input_ids, labels, attention_mask = batch
-    else:
-        input_ids, labels = batch
-        attention_mask = None
+    # 模拟 trainer 的 batch 解包（attention_mask 不传给模型，pad 位已在 labels 中被 -100 忽略）
+    input_ids, labels = batch[0], batch[1]
 
     before = None
     losses = []
     for step in range(5):
-        res = model(input_ids=input_ids, labels=labels, attention_mask=attention_mask)
+        res = model(input_ids=input_ids, labels=labels)
         assert torch.isfinite(res.loss), f"step {step} loss 非有限: {res.loss}"
         losses.append(res.loss.item())
         opt.zero_grad()

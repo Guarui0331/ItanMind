@@ -25,12 +25,8 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
     start_time = time.time()
     last_step = start_step
     for step, batch in enumerate(loader, start=start_step + 1):
-        if len(batch) == 3:
-            input_ids, labels, attention_mask = batch
-            attention_mask = attention_mask.to(args.device)
-        else:
-            input_ids, labels = batch
-            attention_mask = None
+        # dataset 可能返回 2 或 3 个元素；attention_mask 对因果预训练的 loss 无影响（pad 位 labels 已为 -100），这里直接丢弃
+        input_ids, labels = batch[0], batch[1]
         input_ids = input_ids.to(args.device)
         labels = labels.to(args.device)
         last_step = step
@@ -39,7 +35,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             param_group['lr'] = lr
 
         with autocast_ctx:
-            res = model(input_ids, labels=labels, attention_mask=attention_mask)
+            res = model(input_ids, labels=labels)
             aux_loss = getattr(res, 'aux_loss', None)
             loss = res.loss + aux_loss if aux_loss is not None else res.loss
             loss = loss / args.accumulation_steps

@@ -24,7 +24,13 @@ warnings.filterwarnings('ignore')
 def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
     start_time = time.time()
     last_step = start_step
-    for step, (input_ids, labels) in enumerate(loader, start=start_step + 1):
+    for step, batch in enumerate(loader, start=start_step + 1):
+        if len(batch) == 3:
+            input_ids, labels, attention_mask = batch
+            attention_mask = attention_mask.to(args.device)
+        else:
+            input_ids, labels = batch
+            attention_mask = None
         input_ids = input_ids.to(args.device)
         labels = labels.to(args.device)
         last_step = step
@@ -33,7 +39,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             param_group['lr'] = lr
 
         with autocast_ctx:
-            res = model(input_ids, labels=labels)
+            res = model(input_ids, labels=labels, attention_mask=attention_mask)
             aux_loss = getattr(res, 'aux_loss', None)
             loss = res.loss + aux_loss if aux_loss is not None else res.loss
             loss = loss / args.accumulation_steps
@@ -56,7 +62,14 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             current_logits_loss = current_loss - current_aux_loss
             current_lr = optimizer.param_groups[-1]['lr']
             eta_min = spend_time / max(step - start_step, 1) * (iters - step) // 60
-            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min')
+            Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.6e}, logits_loss: {current_logits_loss:.6e}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min')
+            logits_f = res.logits.detach().float()
+            non_ignore = (labels != -100).sum().item()
+            Logger(f'  [debug] logits mean={logits_f.mean().item():.3e} std={logits_f.std().item():.3e} '
+                   f'min={logits_f.min().item():.3e} max={logits_f.max().item():.3e} | '
+                   f'labels non-ignore={non_ignore}/{labels.numel()} | '
+                   f'input_ids[0,:12]={input_ids[0,:12].tolist()} | '
+                   f'labels[0,:12]={labels[0,:12].tolist()}')
             if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
 
         if (step % args.save_interval == 0 or step == iters) and is_main_process():

@@ -2,7 +2,7 @@ from transformers import PretrainedConfig
 import math
 
 from transformers.activations import ACT2FN
-from transformers import PretrainedModel, GenerationMixin
+from transformers import PreTrainedModel, GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 
@@ -122,7 +122,7 @@ class Attention(nn.Module):
         self.num_kv_heads = args.num_key_value_heads if args.num_key_value_heads is not None else args.num_attention_heads
         assert self.n_local_heads % self.num_kv_heads == 0, "num_attention_heads 必须能被 num_key_value_heads 整除"
 
-        self.n_rep = self.num_kv_heads // self.n_local_heads
+        self.n_rep = self.n_local_heads // self.num_kv_heads
         self.head_dim = args.hidden_size // args.num_attention_heads
 
         self.q_proj = nn.Linear(args.hidden_size, args.num_attention_heads * self.head_dim, bias=False)
@@ -167,14 +167,12 @@ class Attention(nn.Module):
 
         if self.flash and seq_len > 1:
             dropout_p = self.dropout if self.training else 0.0
-            if attention_mask is None:
-                output = F.scaled_dot_product_attention(
-                    xq, xk, xv,
-                    attn_mask=None,
-                    dropout_p=dropout_p,
-                    is_causal=True
-                )
-
+            output = F.scaled_dot_product_attention(
+                xq, xk, xv,
+                attn_mask=attention_mask,
+                dropout_p=dropout_p,
+                is_causal=(attention_mask is None),
+            )
         else:
             kv_seq_len = xk.shape[-2]
             scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)
@@ -187,10 +185,12 @@ class Attention(nn.Module):
                 scores = scores + attention_mask
             scores = F.softmax(scores.float(), dim=-1).type_as(xq)
             scores = self.attn_dropout(scores)
-            output = (scores @ xv).transpose(1, 2).contiguous().view(bs, seq_len, -1)
-            output = self.resid_dropout(self.o_proj(output))
+            output = scores @ xv
 
-        return output, past_kv if use_cache else None
+        output = output.transpose(1, 2).contiguous().view(bs, seq_len, -1)
+        output = self.resid_dropout(self.o_proj(output))
+
+        return output, (past_kv if use_cache else None)
 
 class FeedForward(nn.Module):
     # 初始化
@@ -216,6 +216,7 @@ class FeedForward(nn.Module):
 
 class ItanMindBlock(nn.Module):
     def __init__(self, layer_id: int, config: ItanMindConfig):
+        super().__init__()
         self.num_attention_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
         self.head_dim = self.hidden_size // self.num_attention_heads
@@ -283,11 +284,11 @@ class ItanMindModel(nn.Module):
         bs, seq_len = input_ids.shape
         hidden_states = self.dropout(self.embed_tokens(input_ids))
 
-        start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
-        position_embeddings = (self.cos[start_pos:start_pos + seq_len], self.sin[start_pos:start_pos + seq_len])
-
         if past_key_values is None:
             past_key_values = [None] * self.num_hidden_layers
+
+        start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
+        position_embeddings = (self.cos[start_pos:start_pos + seq_len], self.sin[start_pos:start_pos + seq_len])
 
         present_key_values = []
         for i, layer in enumerate(self.layer):
@@ -303,12 +304,10 @@ class ItanMindModel(nn.Module):
         hidden_states = self.norm(hidden_states)
         return hidden_states, present_key_values
 
-class ItanMind4CausalLM(PretrainedModel, GenerationMixin):
+class ItanMind4CausalLM(PreTrainedModel, GenerationMixin):
     config_class = ItanMindConfig
 
     def __init__(self, config: ItanMindConfig):
-        self.config = config
-
         super().__init__(config)
 
         self.model = ItanMindModel(config)

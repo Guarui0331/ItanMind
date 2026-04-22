@@ -97,7 +97,7 @@ if __name__ == '__main__':
     parser.add_argument('--save_interval', type=int, default=1000)
     parser.add_argument('--save_dir', type=str, default='../out')
     parser.add_argument('--save_weight', type=str, default='pretrain')
-    parser.add_argument('--data_path', type=str, default='../dataset/pretrain_data.jsonl')
+    parser.add_argument('--data_path', type=str, default='../dataset/pretrain_t2t_mini.jsonl')
     parser.add_argument('--tokenizer_path', type=str, default='../model')
     parser.add_argument('--max_seq_len', type=int, default=512)
     parser.add_argument('--num_workers', type=int, default=2)
